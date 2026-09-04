@@ -12,7 +12,7 @@ from sqlalchemy import (
     Text,
     func,
 )
-from sqlalchemy.dialects.postgresql import JSON
+from sqlalchemy import JSON
 
 from ..database import Base
 

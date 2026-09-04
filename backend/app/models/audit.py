@@ -10,7 +10,7 @@ from sqlalchemy import (
     Text,
     func,
 )
-from sqlalchemy.dialects.postgresql import JSON
+from sqlalchemy import JSON
 
 from ..database import Base
 
@@ -24,7 +24,7 @@ class AuditLog(Base):
     entity_id = Column(String(100), nullable=True)
     detail = Column(Text, nullable=True)
     user_name = Column(String(100), default="system")
-    metadata = Column(JSON, default=dict)
+    extra_data = Column("metadata", JSON, default=dict)
     created_at = Column(DateTime, server_default=func.now())
 
     def __repr__(self) -> str:

@@ -4,7 +4,7 @@ from functools import lru_cache
 class Settings(BaseSettings):
     APP_NAME: str = "CVE Explorer"
     DEBUG: bool = False
-    DATABASE_URL: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/cve_explorer"
+    DATABASE_URL: str = "sqlite+aiosqlite:///./cve_explorer.db"
     REDIS_URL: str = "redis://localhost:6379/0"
     CIRCL_API: str = "https://cve.circl.lu/api"
     NVD_API: str = "https://services.nvd.nist.gov/rest/json/cves/2.0"

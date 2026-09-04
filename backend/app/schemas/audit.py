@@ -12,7 +12,7 @@ class AuditLogEntry(BaseModel):
     entity_id: Optional[str] = None
     detail: Optional[str] = None
     user_name: str = "system"
-    metadata: dict = {}
+    extra_data: dict = {}
     created_at: Optional[datetime] = None
 
     model_config = {"from_attributes": True}

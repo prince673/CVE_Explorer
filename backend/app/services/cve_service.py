@@ -145,7 +145,17 @@ async def get_or_create_cve(db: AsyncSession, cve_id: str) -> dict:
     # Fetch from APIs
     cve_data = await fetch_cve(cve_id)
     enrichments = await fetch_cve_enrichments(cve_id)
-    merged = {**cve_data, **enrichments}
+    epss = enrichments.get("epss") or {}
+    kev = enrichments.get("kev") or {}
+    merged = {
+        **cve_data,
+        "epss_probability": epss.get("probability"),
+        "epss_percentile": epss.get("percentile"),
+        "in_kev": kev.get("inCatalog", False),
+        "kev_due_date": kev.get("dueDate"),
+        "has_exploit": enrichments.get("hasExploit", False),
+        "exploit_sources": enrichments.get("exploitSources", []),
+    }
 
     if db_cve:
         for key, value in merged.items():
