@@ -9,9 +9,7 @@ async def find_affected_assets(db: AsyncSession, cve_data: dict) -> list[dict]:
     products = [p.lower() for p in (cve_data.get("products") or [])]
     description = (cve_data.get("description") or "").lower()
 
-    result = await db.execute(
-        select(Asset).join(AssetSoftware)
-    )
+    result = await db.execute(select(Asset).join(AssetSoftware))
     assets = result.scalars().all()
 
     affected = []
@@ -65,7 +63,7 @@ async def find_cves_for_asset(db: AsyncSession, asset_id: int) -> list[dict]:
         cve_result = await db.execute(
             select(CVE).where(
                 or_(
-                    CVE.products.op("@>")(f'["{sw.name}"]'),
+                    CVE.products.contains(sw.name),
                     CVE.description.ilike(f"%{sw_lower}%"),
                 )
             )
@@ -73,9 +71,9 @@ async def find_cves_for_asset(db: AsyncSession, asset_id: int) -> list[dict]:
         for cve in cve_result.scalars().all():
             affected_cves.append({
                 "cve_id": cve.cve_id,
-                "cvss3_score": cve.cvss3_score,
-                "severity": cve.severity,
                 "risk_score": cve.risk_score,
+                "risk_level": cve.risk_level,
+                "priority": cve.priority,
                 "software_match": sw.name,
             })
 

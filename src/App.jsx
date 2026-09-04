@@ -9,17 +9,14 @@ import GuideTypesPanel      from './components/GuideTypesPanel'
 import Footer               from './components/Footer'
 import RiskScoreCard        from './components/RiskScoreCard'
 import ExploitabilityCard   from './components/ExploitabilityCard'
-import ExploitTimeline      from './components/ExploitTimeline'
-import ClassificationEvidence from './components/ClassificationEvidence'
 import AffectedAssetsPanel  from './components/AffectedAssetsPanel'
 import RemediationTracker   from './components/RemediationTracker'
 import AlertPanel           from './components/AlertPanel'
 import SBOMScanner          from './components/SBOMScanner'
 import AssetManager         from './components/AssetManager'
 import AnalyticsDashboard   from './components/AnalyticsDashboard'
-import { lookupCVE, fetchCVEEnrichments, getUnreadAlertCount } from './services/api'
+import { lookupCVE, getUnreadAlertCount } from './services/api'
 import { buildGuide }       from './utils/guideEngine'
-import { calculateRiskScore, calculateExploitability, distinguishSeverityVsRisk } from './utils/riskScoring'
 
 const VIEWS = {
   HOME: 'home',
@@ -35,13 +32,7 @@ export default function App() {
   const [view, setView] = useState(VIEWS.HOME)
   const [cveData, setCveData] = useState(null)
   const [guide, setGuide] = useState(null)
-  const [enrichments, setEnrichments] = useState(null)
-  const [riskScore, setRiskScore] = useState(null)
-  const [exploitability, setExploitability] = useState(null)
-  const [severityVsRisk, setSeverityVsRisk] = useState(null)
-  const [timeline, setTimeline] = useState(null)
   const [loading, setLoading] = useState(false)
-  const [loadingEnrichments, setLoadingEnrichments] = useState(false)
   const [error, setError] = useState(null)
   const [alertCount, setAlertCount] = useState(0)
   const searchGenRef = useRef(0)
@@ -53,11 +44,6 @@ export default function App() {
   function handleReset() {
     setCveData(null)
     setGuide(null)
-    setEnrichments(null)
-    setRiskScore(null)
-    setExploitability(null)
-    setSeverityVsRisk(null)
-    setTimeline(null)
     setError(null)
     setView(VIEWS.HOME)
     window.scrollTo({ top: 0, behavior: 'smooth' })
@@ -74,11 +60,6 @@ export default function App() {
     setError(null)
     setCveData(null)
     setGuide(null)
-    setEnrichments(null)
-    setRiskScore(null)
-    setExploitability(null)
-    setSeverityVsRisk(null)
-    setTimeline(null)
     setView(VIEWS.RESULTS)
 
     try {
@@ -86,27 +67,19 @@ export default function App() {
       if (gen !== searchGenRef.current) return
       setCveData(data)
 
-      const g = buildGuide(data)
+      const g = buildGuide({
+        cve_id: data.cve_id,
+        description: data.description,
+        cwes: data.cwes,
+        products: data.products,
+        references: data.references,
+        best_cvss: data.best_cvss,
+        cvss_scores: data.cvss_scores,
+      })
       if (gen !== searchGenRef.current) return
       setGuide(g)
 
       setLoading(false)
-
-      setLoadingEnrichments(true)
-      const enrich = await fetchCVEEnrichments(id)
-      if (gen !== searchGenRef.current) return
-      setEnrichments(enrich)
-
-      const risk = calculateRiskScore(data, enrich)
-      setRiskScore(risk)
-
-      const exploit = calculateExploitability(data, enrich)
-      setExploitability(exploit)
-
-      const svr = distinguishSeverityVsRisk(data, risk, exploit)
-      setSeverityVsRisk(svr)
-
-      setTimeline(null)
 
       getUnreadAlertCount().then(d => setAlertCount(d.count ?? 0)).catch(() => {})
 
@@ -119,10 +92,7 @@ export default function App() {
       if (gen !== searchGenRef.current) return
       setError(err.message || 'An unexpected error occurred.')
     } finally {
-      if (gen === searchGenRef.current) {
-        setLoading(false)
-        setLoadingEnrichments(false)
-      }
+      if (gen === searchGenRef.current) setLoading(false)
     }
   }
 
@@ -141,11 +111,7 @@ export default function App() {
 
         {view === VIEWS.RESULTS && (
           <>
-            {loading && <LoadingSpinner message="Fetching vulnerability data..." />}
-
-            {loadingEnrichments && !loading && (
-              <LoadingSpinner message="Enriching with EPSS, KEV, and exploit data..." />
-            )}
+            {loading && <LoadingSpinner message="Fetching vulnerability intelligence..." />}
 
             {error && !loading && (
               <div className="flex items-start gap-4 card border-red-500/40 bg-red-500/8
@@ -170,32 +136,21 @@ export default function App() {
                   <span>←</span> New Search
                 </button>
 
-                <VulnerabilityCard cve={cveData} enrichments={enrichments} />
+                <VulnerabilityCard cve={cveData} />
 
-                {riskScore && (
-                  <RiskScoreCard
-                    riskScore={riskScore}
-                    exploitability={exploitability}
-                    severityVsRisk={severityVsRisk}
-                  />
+                {cveData.risk && (
+                  <RiskScoreCard risk={cveData.risk} />
                 )}
 
-                {exploitability && (
-                  <ExploitabilityCard exploitability={exploitability} enrichments={enrichments} />
-                )}
+                <ExploitabilityCard cve={cveData} />
 
                 {guide && (
-                  <>
-                    <ClassificationEvidence classification={guide.classification} />
-                    <ExploitationGuide guide={guide} />
-                  </>
+                  <ExploitationGuide guide={guide} />
                 )}
 
-                <AffectedAssetsPanel cveData={cveData} />
+                <AffectedAssetsPanel assets={cveData.affected_assets || []} />
 
-                {timeline && <ExploitTimeline events={timeline} />}
-
-                <RemediationTracker cveId={cveData.id} />
+                <RemediationTracker cveId={cveData.cve_id} />
 
                 <button
                   onClick={handleReset}

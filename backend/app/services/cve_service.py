@@ -1,21 +1,25 @@
-"""CVE data fetching, normalization, and caching from multiple sources."""
+"""CVE data fetching, normalization, and storage across separate intelligence tables."""
 import httpx
 import asyncio
+import time
 from datetime import datetime
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from ..config import get_settings
 from ..models.cve import CVE
+from ..models.cvss import CvssScore
+from ..models.epss import EpssScore
+from ..models.kev import KevEntry
+from ..models.exploit import ExploitSource
 
 settings = get_settings()
 
 KEV_CACHE: dict = {}
 KEV_CACHE_TIME: float = 0
-KEV_TTL: float = 21600  # 6 hours
+KEV_TTL: float = 21600
 
 
 async def fetch_from_circl(cve_id: str) -> dict | None:
-    """Fetch CVE from CIRCL API (primary source)."""
     try:
         async with httpx.AsyncClient(timeout=10) as client:
             resp = await client.get(f"{settings.CIRCL_API}/cve/{cve_id}")
@@ -29,7 +33,6 @@ async def fetch_from_circl(cve_id: str) -> dict | None:
 
 
 async def fetch_from_nvd(cve_id: str) -> dict | None:
-    """Fetch CVE from NVD API (fallback)."""
     try:
         async with httpx.AsyncClient(timeout=15) as client:
             resp = await client.get(settings.NVD_API, params={"cveId": cve_id})
@@ -44,7 +47,6 @@ async def fetch_from_nvd(cve_id: str) -> dict | None:
 
 
 async def fetch_cve(cve_id: str) -> dict:
-    """Fetch CVE from best available source."""
     result = await fetch_from_circl(cve_id)
     if result:
         return result
@@ -54,8 +56,7 @@ async def fetch_cve(cve_id: str) -> dict:
     raise ValueError(f"CVE {cve_id} not found in any database.")
 
 
-async def fetch_epss(cve_id: str) -> dict | None:
-    """Fetch EPSS score from FIRST.org."""
+async def fetch_epss_score(cve_id: str) -> dict | None:
     try:
         async with httpx.AsyncClient(timeout=10) as client:
             resp = await client.get(settings.EPSS_API, params={"cve": cve_id})
@@ -64,7 +65,7 @@ async def fetch_epss(cve_id: str) -> dict | None:
                 if data.get("data"):
                     item = data["data"][0]
                     return {
-                        "probability": float(item.get("epss", 0)),
+                        "score": float(item.get("epss", 0)),
                         "percentile": float(item.get("percentile", 0)),
                     }
     except Exception:
@@ -73,9 +74,7 @@ async def fetch_epss(cve_id: str) -> dict | None:
 
 
 async def fetch_kev_catalog() -> dict:
-    """Fetch CISA KEV catalog (cached)."""
     global KEV_CACHE, KEV_CACHE_TIME
-    import time
     if KEV_CACHE and (time.time() - KEV_CACHE_TIME) < KEV_TTL:
         return KEV_CACHE
     try:
@@ -92,7 +91,6 @@ async def fetch_kev_catalog() -> dict:
 
 
 async def fetch_exploits(cve_id: str) -> list[dict]:
-    """Search for public exploits on GitHub."""
     try:
         async with httpx.AsyncClient(timeout=10) as client:
             resp = await client.get(
@@ -103,7 +101,12 @@ async def fetch_exploits(cve_id: str) -> list[dict]:
             if resp.status_code == 200:
                 data = resp.json()
                 return [
-                    {"url": item["html_url"], "stars": item.get("stargazers_count", 0)}
+                    {
+                        "url": item["html_url"],
+                        "name": item.get("name", ""),
+                        "stars": item.get("stargazers_count", 0),
+                        "source_type": "github",
+                    }
                     for item in data.get("items", [])[:5]
                 ]
     except Exception:
@@ -111,87 +114,265 @@ async def fetch_exploits(cve_id: str) -> list[dict]:
     return []
 
 
-async def fetch_cve_enrichments(cve_id: str) -> dict:
-    """Fetch all enrichments for a CVE in parallel."""
-    epss_task, kev_task, exploit_task = await asyncio.gather(
-        fetch_epss(cve_id),
+async def fetch_all_enrichments(cve_id: str) -> dict:
+    """Fetch EPSS, KEV, and exploits in parallel."""
+    epss_data, kev_catalog, exploit_data = await asyncio.gather(
+        fetch_epss_score(cve_id),
         fetch_kev_catalog(),
         fetch_exploits(cve_id),
     )
-    kev_entry = kev_task.get(cve_id)
+    kev_entry = kev_catalog.get(cve_id)
     return {
-        "epss": epss_task,
-        "kev": {
-            "inCatalog": kev_entry is not None,
-            "dueDate": kev_entry.get("dueDate") if kev_entry else None,
-            "knownRansomwareCampaignUse": kev_entry.get("knownRansomwareCampaignUse", "Unknown") if kev_entry else "Unknown",
-        } if kev_entry else {"inCatalog": False},
-        "hasExploit": len(exploit_task) > 0,
-        "exploitSources": exploit_task,
+        "epss": epss_data,
+        "kev": kev_entry,
+        "exploits": exploit_data,
     }
 
 
+async def _upsert_cvss(db: AsyncSession, cve_id: str, scores: list[dict]):
+    """Insert or update CVSS scores for a CVE."""
+    for s in scores:
+        existing = (await db.execute(
+            select(CvssScore).where(
+                CvssScore.cve_id == cve_id, CvssScore.version == s["version"]
+            )
+        )).scalar_one_or_none()
+        if existing:
+            for k, v in s.items():
+                setattr(existing, k, v)
+            existing.updated_at = datetime.utcnow()
+        else:
+            db.add(CvssScore(cve_id=cve_id, **s))
+
+
+async def _upsert_epss(db: AsyncSession, cve_id: str, data: dict | None):
+    """Insert or update EPSS score for a CVE."""
+    if not data:
+        return
+    existing = (await db.execute(
+        select(EpssScore).where(EpssScore.cve_id == cve_id)
+    )).scalar_one_or_none()
+    if existing:
+        existing.score = data["score"]
+        existing.percentile = data["percentile"]
+        existing.calculated_at = datetime.utcnow()
+        existing.updated_at = datetime.utcnow()
+    else:
+        db.add(EpssScore(cve_id=cve_id, score=data["score"], percentile=data["percentile"]))
+
+
+async def _upsert_kev(db: AsyncSession, cve_id: str, data: dict | None):
+    """Insert or update KEV entry for a CVE."""
+    if not data:
+        return
+    existing = (await db.execute(
+        select(KevEntry).where(KevEntry.cve_id == cve_id)
+    )).scalar_one_or_none()
+    fields = {
+        "vendor": data.get("vendorProject"),
+        "product": data.get("product"),
+        "vulnerability_name": data.get("vulnerabilityName"),
+        "date_added": data.get("dateAdded"),
+        "short_description": data.get("shortDescription"),
+        "required_action": data.get("requiredAction"),
+        "due_date": data.get("dueDate"),
+        "known_ransomware_campaign_use": data.get("knownRansomwareCampaignUse"),
+        "notes": data.get("notes"),
+    }
+    if existing:
+        for k, v in fields.items():
+            setattr(existing, k, v)
+        existing.last_updated = datetime.utcnow()
+    else:
+        db.add(KevEntry(cve_id=cve_id, **fields))
+
+
+async def _upsert_exploits(db: AsyncSession, cve_id: str, exploits: list[dict]):
+    """Replace exploit sources for a CVE."""
+    for e in (await db.execute(
+        select(ExploitSource).where(ExploitSource.cve_id == cve_id)
+    )).scalars().all():
+        db.delete(e)
+    await db.flush()
+    seen_urls = set()
+    for e in exploits:
+        if e["url"] not in seen_urls:
+            seen_urls.add(e["url"])
+            db.add(ExploitSource(
+                cve_id=cve_id,
+                url=e["url"],
+                name=e.get("name", ""),
+                source_type=e.get("source_type", "github"),
+                stars=e.get("stars", 0),
+            ))
+
+
 async def get_or_create_cve(db: AsyncSession, cve_id: str) -> dict:
-    """Get CVE from DB cache or fetch from APIs, then store."""
-    # Check DB first
+    """Fetch CVE from APIs, populate all intelligence tables, return assembled dict."""
     result = await db.execute(select(CVE).where(CVE.cve_id == cve_id))
     db_cve = result.scalar_one_or_none()
 
     if db_cve and db_cve.updated_at:
         age_hours = (datetime.utcnow() - db_cve.updated_at).total_seconds() / 3600
         if age_hours < 24:
-            return _cve_to_dict(db_cve)
+            return await _assemble_cve_dict(db, db_cve)
 
-    # Fetch from APIs
     cve_data = await fetch_cve(cve_id)
-    enrichments = await fetch_cve_enrichments(cve_id)
-    epss = enrichments.get("epss") or {}
-    kev = enrichments.get("kev") or {}
-    merged = {
-        **cve_data,
-        "epss_probability": epss.get("probability"),
-        "epss_percentile": epss.get("percentile"),
-        "in_kev": kev.get("inCatalog", False),
-        "kev_due_date": kev.get("dueDate"),
-        "has_exploit": enrichments.get("hasExploit", False),
-        "exploit_sources": enrichments.get("exploitSources", []),
-    }
+    enrichments = await fetch_all_enrichments(cve_id)
 
     if db_cve:
-        for key, value in merged.items():
-            if hasattr(db_cve, key):
-                setattr(db_cve, key, value)
+        for key in ("description", "published_date", "modified_date", "cwes", "products", "references"):
+            if key in cve_data:
+                setattr(db_cve, key, cve_data[key])
         db_cve.updated_at = datetime.utcnow()
     else:
-        db_cve = CVE(cve_id=cve_id, **merged)
+        db_cve = CVE(
+            cve_id=cve_id,
+            description=cve_data.get("description"),
+            published_date=cve_data.get("published_date"),
+            modified_date=cve_data.get("modified_date"),
+            cwes=cve_data.get("cwes", []),
+            products=cve_data.get("products", []),
+            references=cve_data.get("references", []),
+        )
         db.add(db_cve)
 
+    await db.flush()
+
+    await _upsert_cvss(db, cve_id, cve_data.get("cvss_scores", []))
+    await _upsert_epss(db, cve_id, enrichments.get("epss"))
+    await _upsert_kev(db, cve_id, enrichments.get("kev"))
+    await _upsert_exploits(db, cve_id, enrichments.get("exploits", []))
+
     await db.commit()
-    return _cve_to_dict(db_cve)
+    return await _assemble_cve_dict(db, db_cve)
+
+
+async def _assemble_cve_dict(db: AsyncSession, cve: CVE) -> dict:
+    """Read CVE + all related tables and return a flat dict for the API."""
+    cvss_list = list(
+        (await db.execute(
+            select(CvssScore).where(CvssScore.cve_id == cve.cve_id)
+        )).scalars().all()
+    )
+    epss = (await db.execute(
+        select(EpssScore).where(EpssScore.cve_id == cve.cve_id)
+    )).scalar_one_or_none()
+    kev = (await db.execute(
+        select(KevEntry).where(KevEntry.cve_id == cve.cve_id)
+    )).scalar_one_or_none()
+    exploits = list(
+        (await db.execute(
+            select(ExploitSource).where(ExploitSource.cve_id == cve.cve_id)
+        )).scalars().all()
+    )
+
+    best_cvss = max((s for s in cvss_list if s.score is not None), key=lambda s: s.score, default=None)
+
+    return {
+        "cve_id": cve.cve_id,
+        "description": cve.description,
+        "published_date": cve.published_date.isoformat() if cve.published_date else None,
+        "modified_date": cve.modified_date.isoformat() if cve.modified_date else None,
+        "cwes": list(dict.fromkeys(cve.cwes or [])),
+        "products": list(dict.fromkeys(cve.products or [])),
+        "references": list(dict.fromkeys(cve.references or [])),
+        "cvss_scores": [
+            {
+                "version": s.version,
+                "score": s.score,
+                "severity": s.severity,
+                "vector_string": s.vector_string,
+                "attack_vector": s.attack_vector,
+                "attack_complexity": s.attack_complexity,
+                "privileges_required": s.privileges_required,
+                "user_interaction": s.user_interaction,
+                "scope": s.scope,
+                "confidentiality": s.confidentiality,
+                "integrity": s.integrity,
+                "availability": s.availability,
+            }
+            for s in sorted(cvss_list, key=lambda x: x.version, reverse=True)
+        ],
+        "best_cvss": {
+            "version": best_cvss.version if best_cvss else None,
+            "score": best_cvss.score if best_cvss else None,
+            "severity": best_cvss.severity if best_cvss else None,
+            "vector_string": best_cvss.vector_string if best_cvss else None,
+        } if best_cvss else None,
+        "epss": {
+            "score": epss.score,
+            "percentile": epss.percentile,
+            "calculated_at": epss.calculated_at.isoformat() if epss and epss.calculated_at else None,
+        } if epss else None,
+        "kev": {
+            "vendor": kev.vendor,
+            "product": kev.product,
+            "vulnerability_name": kev.vulnerability_name,
+            "date_added": kev.date_added,
+            "due_date": kev.due_date,
+            "required_action": kev.required_action,
+            "known_ransomware_campaign_use": kev.known_ransomware_campaign_use,
+            "short_description": kev.short_description,
+        } if kev else None,
+        "exploits": [
+            {"url": e.url, "name": e.name, "source_type": e.source_type, "stars": e.stars}
+            for e in exploits
+        ],
+    }
 
 
 def _normalize_circl(data: dict) -> dict:
-    """Normalize CIRCL API response to our schema."""
     summary = data.get("summary", {})
+    cvss_data = data.get("cvss") if isinstance(data.get("cvss"), dict) else {}
+    cvss3_score = data.get("cvss3") or cvss_data.get("score")
+    cvss2_score = cvss_data.get("score")
+    best_score = cvss3_score or cvss2_score
+
+    cvss_scores = []
+    if cvss3_score is not None:
+        cvss_scores.append({
+            "version": "3.1",
+            "score": cvss3_score,
+            "severity": _severity_from_cvss(cvss3_score),
+            "vector_string": data.get("cvss3-vector") or data.get("cvss", {}).get("vector") if isinstance(data.get("cvss"), dict) else None,
+            "attack_vector": None,
+            "attack_complexity": None,
+            "privileges_required": None,
+            "user_interaction": None,
+            "scope": None,
+            "confidentiality": None,
+            "integrity": None,
+            "availability": None,
+        })
+    if cvss2_score is not None:
+        cvss_scores.append({
+            "version": "2.0",
+            "score": cvss2_score,
+            "severity": _severity_from_cvss(cvss2_score),
+            "vector_string": None,
+            "attack_vector": None,
+            "attack_complexity": None,
+            "privileges_required": None,
+            "user_interaction": None,
+            "scope": None,
+            "confidentiality": None,
+            "integrity": None,
+            "availability": None,
+        })
+
     return {
         "description": summary.get("description", data.get("summary", "")),
         "published_date": _parse_date(data.get("Published")),
         "modified_date": _parse_date(data.get("Modified")),
-        "cvss3_score": data.get("cvss3") or data.get("cvss", {}).get("score") if isinstance(data.get("cvss"), dict) else None,
-        "cvss2_score": data.get("cvss", {}).get("score") if isinstance(data.get("cvss"), dict) else None,
-        "severity": _severity_from_cvss(data.get("cvss3") or (data.get("cvss", {}).get("score") if isinstance(data.get("cvss"), dict) else None)),
+        "cvss_scores": cvss_scores,
         "cwes": [c.get("name", c) if isinstance(c, dict) else c for c in (data.get("cwe") or [])],
         "products": data.get("vulnerable_product_list") or [],
         "references": data.get("references") or [],
-        "attack_vector": None,
-        "attack_complexity": None,
-        "privileges_required": None,
-        "user_interaction": None,
     }
 
 
 def _normalize_nvd(data: dict) -> dict:
-    """Normalize NVD API response to our schema."""
     descriptions = data.get("descriptions", [])
     desc = next((d["value"] for d in descriptions if d.get("language") == "en"), "")
 
@@ -200,8 +381,24 @@ def _normalize_nvd(data: dict) -> dict:
     cvss30 = metrics.get("cvssMetricV30", [{}])[0] if metrics.get("cvssMetricV30") else None
     cvss2 = metrics.get("cvssMetricV2", [{}])[0] if metrics.get("cvssMetricV2") else None
 
-    cvss3_data = (cvss31 or cvss30 or {}).get("cvssData", {})
-    cvss2_data = (cvss2 or {}).get("cvssData", {})
+    cvss_scores = []
+    for entry, ver in [(cvss31, "3.1"), (cvss30, "3.0"), (cvss2, "2.0")]:
+        if entry:
+            cd = entry.get("cvssData", {})
+            cvss_scores.append({
+                "version": ver,
+                "score": cd.get("baseScore") or entry.get("baseScore"),
+                "severity": _severity_from_cvss(cd.get("baseScore") or entry.get("baseScore")),
+                "vector_string": cd.get("vectorString") or entry.get("vectorString"),
+                "attack_vector": cd.get("attackVector"),
+                "attack_complexity": cd.get("attackComplexity"),
+                "privileges_required": cd.get("privilegesRequired"),
+                "user_interaction": cd.get("userInteraction"),
+                "scope": cd.get("scope"),
+                "confidentiality": cd.get("confidentialityImpact"),
+                "integrity": cd.get("integrityImpact"),
+                "availability": cd.get("availabilityImpact"),
+            })
 
     weaknesses = data.get("weaknesses", [])
     cwes = []
@@ -227,16 +424,10 @@ def _normalize_nvd(data: dict) -> dict:
         "description": desc,
         "published_date": _parse_date(data.get("published")),
         "modified_date": _parse_date(data.get("lastModified")),
-        "cvss3_score": cvss3_data.get("baseScore"),
-        "cvss2_score": cvss2_data.get("baseScore"),
-        "severity": _severity_from_cvss(cvss3_data.get("baseScore") or cvss2_data.get("baseScore")),
+        "cvss_scores": cvss_scores,
         "cwes": cwes,
         "products": products,
         "references": references,
-        "attack_vector": cvss3_data.get("attackVector"),
-        "attack_complexity": cvss3_data.get("attackComplexity"),
-        "privileges_required": cvss3_data.get("privilegesRequired"),
-        "user_interaction": cvss3_data.get("userInteraction"),
     }
 
 
@@ -255,11 +446,10 @@ def _parse_date(date_str: str | None) -> datetime | None:
 def _severity_from_cvss(score: float | None) -> str | None:
     if score is None:
         return None
-    if score >= 9.0: return "Critical"
-    if score >= 7.0: return "High"
-    if score >= 4.0: return "Medium"
+    if score >= 9.0:
+        return "Critical"
+    if score >= 7.0:
+        return "High"
+    if score >= 4.0:
+        return "Medium"
     return "Low"
-
-
-def _cve_to_dict(cve: CVE) -> dict:
-    return {c.key: getattr(cve, c.key) for c in CVE.__table__.columns}

@@ -1,147 +1,170 @@
-"""Explainable risk scoring engine combining CVSS, EPSS, KEV, exploits, and asset context."""
-from ..models.cve import CVE
-from ..schemas.cve import CVERisk
+"""Transparent risk-prioritization engine.
 
-SEVERITY_WEIGHTS = {"Critical": 25, "High": 15, "Medium": 8, "Low": 3}
-ATTACK_VECTORS = {"NETWORK": 10, "ADJACENT_NETWORK": 6, "LOCAL": 4, "PHYSICAL": 2}
-EXPLOITABILITY_FACTORS = {
-    "no_known_exploits": 0,
-    "public_exploit_available": 10,
-    "actively_exploited": 20,
-    "kev_catalog_entry": 25,
-}
+Combines CVSS (severity) + EPSS (exploitation likelihood) + KEV (confirmed exploitation)
++ exploit availability + asset context to produce a P1–P4 priority with human-readable reasons.
+
+Each signal contributes independently to the score and produces a written justification.
+"""
 
 
-def calculate_risk_score(cve_data: dict, enrichments: dict, assets: list[dict] | None = None) -> CVERisk:
-    """Calculate explainable risk score 0-100."""
-    factors = {}
+def calculate_risk_assessment(
+    cve_data: dict,
+    affected_assets: list[dict] | None = None,
+) -> dict:
+    """Produce a full risk assessment from the assembled CVE data dict.
 
-    # CVSS severity factor
-    cvss = cve_data.get("cvss3_score") or cve_data.get("cvss2_score") or 0
-    severity = cve_data.get("severity", "Low")
-    factors["cvss_severity"] = {"value": SEVERITY_WEIGHTS.get(severity, 0), "label": f"CVSS {severity} ({cvss}/10)"}
+    The cve_data dict should contain:
+        best_cvss: { score, severity, version }
+        epss: { score, percentile } | null
+        kev: { vendor, product, due_date, ... } | null
+        exploits: [{ url, name, stars }] | []
 
-    # EPSS factor
-    epss = enrichments.get("epss", {})
-    prob = epss.get("probability", 0)
-    if prob >= 0.7:
-        factors["epss"] = {"value": 20, "label": f"EPSS {prob*100:.0f}% - high exploitation probability"}
-    elif prob >= 0.4:
-        factors["epss"] = {"value": 12, "label": f"EPSS {prob*100:.0f}% - moderate probability"}
-    elif prob >= 0.1:
-        factors["epss"] = {"value": 5, "label": f"EPSS {prob*100:.0f}% - low probability"}
-    else:
-        factors["epss"] = {"value": 0, "label": f"EPSS {prob*100:.0f}% - minimal probability"}
-
-    # KEV factor
-    kev = enrichments.get("kev", {})
-    if kev.get("inCatalog"):
-        factors["kev"] = {"value": 25, "label": "CISA Known Exploited Vulnerability"}
-    else:
-        factors["kev"] = {"value": 0, "label": "Not in CISA KEV catalog"}
-
-    # Exploit availability
-    if enrichments.get("hasExploit"):
-        sources = enrichments.get("exploitSources", [])
-        top = sources[0] if sources else {}
-        stars = top.get("stars", 0)
-        if stars > 100:
-            factors["exploit"] = {"value": 15, "label": f"High-star exploit ({stars} stars)"}
-        else:
-            factors["exploit"] = {"value": 10, "label": "Public exploit code available"}
-    else:
-        factors["exploit"] = {"value": 0, "label": "No known public exploits"}
-
-    # Attack vector
-    av = (cve_data.get("attack_vector") or "").upper()
-    factors["attack_vector"] = {"value": ATTACK_VECTORS.get(av, 0), "label": f"Attack vector: {av or 'unknown'}"}
-
-    # Asset context
-    if assets:
-        internet_facing = sum(1 for a in assets if a.get("internet_facing"))
-        critical_assets = sum(1 for a in assets if a.get("criticality") == "critical")
-        asset_score = min(15, internet_facing * 5 + critical_assets * 5)
-        factors["asset_exposure"] = {
-            "value": asset_score,
-            "label": f"{len(assets)} affected assets ({internet_facing} internet-facing, {critical_assets} critical)"
+    Returns:
+        {
+            "score": 0-100,
+            "level": "Critical" | "High" | "Medium" | "Low",
+            "priority": "P1" | "P2" | "P3" | "P4",
+            "signals": [
+                { "name": str, "label": str, "value": float, "max": float, "weight": str },
+                ...
+            ],
+            "reasons": [ str, ... ],
+            "recommendation": str,
         }
+    """
+    signals = []
+    reasons = []
+    total = 0
+
+    cvss = cve_data.get("best_cvss") or {}
+    cvss_score = cvss.get("score") or 0
+    severity = cvss.get("severity") or "Unknown"
+
+    epss = cve_data.get("epss") or {}
+    epss_score = epss.get("score") or 0
+
+    kev = cve_data.get("kev")
+    has_kev = kev is not None
+
+    exploits = cve_data.get("exploits") or []
+    has_exploit = len(exploits) > 0
+    top_stars = exploits[0].get("stars", 0) if exploits else 0
+
+    # --- 1. CVSS severity (max 25 points) ---
+    cvss_max = 25
+    cvss_points = round((cvss_score / 10) * cvss_max)
+    total += cvss_points
+    signals.append({
+        "name": "cvss",
+        "label": f"CVSS {severity} ({cvss_score}/10)",
+        "value": cvss_points,
+        "max": cvss_max,
+        "weight": "25%",
+    })
+    if cvss_score >= 9.0:
+        reasons.append("Critical technical severity (CVSS >= 9.0)")
+    elif cvss_score >= 7.0:
+        reasons.append("High technical severity (CVSS >= 7.0)")
+    elif cvss_score >= 4.0:
+        reasons.append("Moderate technical severity (CVSS >= 4.0)")
     else:
-        factors["asset_exposure"] = {"value": 0, "label": "No asset correlation data"}
+        reasons.append("Low technical severity")
 
-    total = min(100, sum(f["value"] for f in factors.values()))
-
-    return CVERisk(
-        risk_score=total,
-        risk_factors=factors,
-    )
-
-
-def calculate_exploitability(cve_data: dict, enrichments: dict) -> dict:
-    """Calculate exploitability assessment."""
-    score = 0
-    factors = []
-
-    if cve_data.get("attack_vector", "").upper() == "NETWORK":
-        score += 15
-        factors.append("Network-accessible")
-    if cve_data.get("attack_complexity", "").upper() == "LOW":
-        score += 10
-        factors.append("Low attack complexity")
-    if cve_data.get("privileges_required", "").upper() == "NONE":
-        score += 10
-        factors.append("No privileges required")
-    if cve_data.get("user_interaction", "").upper() == "NONE":
-        score += 5
-        factors.append("No user interaction needed")
-    if enrichments.get("epss", {}).get("probability", 0) >= 0.5:
-        score += 15
-        factors.append("High EPSS probability")
-    if enrichments.get("kev", {}).get("inCatalog"):
-        score += 20
-        factors.append("In CISA KEV catalog")
-    if enrichments.get("hasExploit"):
-        score += 15
-        factors.append("Public exploit available")
-
-    score = min(100, score)
-
-    if score >= 70: level = "Critical"
-    elif score >= 50: level = "High"
-    elif score >= 25: level = "Medium"
-    else: level = "Low"
-
-    return {"score": score, "level": level, "factors": factors}
-
-
-def classify_severity_vs_risk(cve_data: dict, risk, exploitability) -> dict:
-    """Compare technical severity vs organizational risk."""
-    cvss = cve_data.get("cvss3_score") or cve_data.get("cvss2_score") or 0
-    risk_score = risk.risk_score
-    severity_label = cve_data.get("severity", "Unknown")
-
-    divergence = abs(risk_score - (cvss * 10))
-
-    if risk_score > cvss * 10:
-        interpretation = f"Organizational risk ({risk_score}/100) exceeds technical severity ({cvss}/10) due to active exploitation signals."
-    elif risk_score < cvss * 10:
-        interpretation = f"Organizational risk ({risk_score}/100) is lower than technical severity ({cvss}/10), possibly due to limited exploitation evidence."
+    # --- 2. EPSS exploitation probability (max 20 points) ---
+    epss_max = 20
+    epss_points = round(epss_score * epss_max)
+    total += epss_points
+    pct_label = f"{epss_score * 100:.0f}%"
+    if epss_score >= 0.7:
+        signals.append({"name": "epss", "label": f"EPSS {pct_label} — Very High", "value": epss_points, "max": epss_max, "weight": "20%"})
+        reasons.append(f"Very high exploitation probability (EPSS {pct_label})")
+    elif epss_score >= 0.4:
+        signals.append({"name": "epss", "label": f"EPSS {pct_label} — High", "value": epss_points, "max": epss_max, "weight": "20%"})
+        reasons.append(f"High exploitation probability (EPSS {pct_label})")
+    elif epss_score >= 0.1:
+        signals.append({"name": "epss", "label": f"EPSS {pct_label} — Moderate", "value": epss_points, "max": epss_max, "weight": "20%"})
+        reasons.append(f"Moderate exploitation probability (EPSS {pct_label})")
     else:
-        interpretation = f"Technical severity and organizational risk are aligned at {cvss}/10."
+        signals.append({"name": "epss", "label": f"EPSS {pct_label} — Low", "value": epss_points, "max": epss_max, "weight": "20%"})
+        reasons.append(f"Low exploitation probability (EPSS {pct_label})")
 
-    if risk_score >= 60:
-        recommendation = "PRIORITY: This vulnerability should be remediated urgently."
-    elif risk_score >= 30:
-        recommendation = "SCHEDULE: Plan remediation within standard patch cycle."
+    # --- 3. KEV confirmed exploitation (max 25 points) ---
+    kev_max = 25
+    kev_points = kev_max if has_kev else 0
+    total += kev_points
+    if has_kev:
+        signals.append({"name": "kev", "label": "CISA KEV — Confirmed exploited", "value": kev_points, "max": kev_max, "weight": "25%"})
+        reasons.append("Confirmed exploitation in the wild (CISA KEV catalog)")
     else:
-        recommendation = "MONITOR: Track for changes in exploitation status."
+        signals.append({"name": "kev", "label": "Not in CISA KEV", "value": 0, "max": kev_max, "weight": "25%"})
+
+    # --- 4. Public exploit availability (max 15 points) ---
+    exploit_max = 15
+    if has_exploit and top_stars > 100:
+        exploit_points = exploit_max
+        reasons.append(f"Widely available exploit code ({top_stars} stars)")
+    elif has_exploit:
+        exploit_points = 10
+        reasons.append("Public exploit code available")
+    else:
+        exploit_points = 0
+    total += exploit_points
+    signals.append({
+        "name": "exploit",
+        "label": f"{len(exploits)} exploit source{'s' if len(exploits) != 1 else ''}" if has_exploit else "No public exploits",
+        "value": exploit_points,
+        "max": exploit_max,
+        "weight": "15%",
+    })
+
+    # --- 5. Asset exposure (max 15 points) ---
+    asset_max = 15
+    if affected_assets:
+        n_total = len(affected_assets)
+        n_internet = sum(1 for a in affected_assets if a.get("internet_facing"))
+        n_critical = sum(1 for a in affected_assets if a.get("criticality") == "critical")
+        asset_points = min(asset_max, n_internet * 5 + n_critical * 5)
+        total += asset_points
+        signals.append({
+            "name": "asset",
+            "label": f"{n_total} assets ({n_internet} internet-facing, {n_critical} critical)",
+            "value": asset_points,
+            "max": asset_max,
+            "weight": "15%",
+        })
+        if n_internet:
+            reasons.append(f"Internet-facing assets exposed ({n_internet})")
+        if n_critical:
+            reasons.append(f"Critical business assets affected ({n_critical})")
+    else:
+        signals.append({"name": "asset", "label": "No asset data", "value": 0, "max": asset_max, "weight": "15%"})
+
+    # --- Final score ---
+    score = min(100, total)
+
+    if score >= 80:
+        level, priority = "Critical", "P1"
+    elif score >= 60:
+        level, priority = "High", "P2"
+    elif score >= 35:
+        level, priority = "Medium", "P3"
+    else:
+        level, priority = "Low", "P4"
+
+    if priority == "P1":
+        recommendation = "Remediate immediately. Patch affected systems or apply mitigating controls without delay."
+    elif priority == "P2":
+        recommendation = "Remediate urgently. Schedule patching within the current security cycle."
+    elif priority == "P3":
+        recommendation = "Remediate in standard cycle. Include in next regular patch window."
+    else:
+        recommendation = "Monitor. Track for changes in exploitation status or asset exposure."
 
     return {
-        "technicalSeverity": severity_label,
-        "cvssScore": cvss,
-        "organizationalRisk": risk.risk_level if hasattr(risk, 'risk_level') else "Unknown",
-        "riskScore": risk_score,
-        "hasDivergence": divergence > 25,
-        "divergence": round(divergence),
-        "interpretation": interpretation,
+        "score": score,
+        "level": level,
+        "priority": priority,
+        "signals": signals,
+        "reasons": reasons,
         "recommendation": recommendation,
     }

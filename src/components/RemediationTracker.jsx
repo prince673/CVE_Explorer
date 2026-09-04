@@ -42,8 +42,8 @@ export default function RemediationTracker({ cveId }) {
 
   async function handleCreate() {
     await createRemediation({
-      cveId,
-      assignedTo: form.assignedTo,
+      cve_id: cveId,
+      assigned_to: form.assignedTo,
       priority: form.priority,
       notes: form.notes,
     })
@@ -114,7 +114,7 @@ export default function RemediationTracker({ cveId }) {
                   {STATUS_LABELS[rec.status]}
                 </span>
                 <span className="text-xs text-gray-500">{PRIORITY_LABELS[rec.priority]}</span>
-                {rec.assignedTo && <span className="text-xs text-gray-400">→ {rec.assignedTo}</span>}
+                {rec.assigned_to && <span className="text-xs text-gray-400">→ {rec.assigned_to}</span>}
               </div>
               {rec.notes && <p className="text-xs text-gray-500 mb-2">{rec.notes}</p>}
               {rec.history?.length > 0 && (
