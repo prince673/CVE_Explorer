@@ -1,4 +1,5 @@
-import { findAffectedAssets } from '../utils/assetStore'
+import { useState, useEffect } from 'react'
+import { fetchAffectedAssets } from '../services/api'
 
 const CRITICITY_COLORS = {
   critical: 'text-red-400',
@@ -8,11 +9,18 @@ const CRITICITY_COLORS = {
 }
 
 export default function AffectedAssetsPanel({ cveData }) {
-  if (!cveData) return null
+  const [affected, setAffected] = useState(null)
 
-  const affected = findAffectedAssets(cveData)
+  useEffect(() => {
+    if (!cveData?.id) return
+    let cancelled = false
+    fetchAffectedAssets(cveData.id)
+      .then(data => { if (!cancelled) setAffected(data ?? []) })
+      .catch(() => { if (!cancelled) setAffected([]) })
+    return () => { cancelled = true }
+  }, [cveData?.id])
 
-  if (affected.length === 0) return null
+  if (!cveData || affected === null || affected.length === 0) return null
 
   return (
     <div className="card mb-5 border-l-4 border-red-500">

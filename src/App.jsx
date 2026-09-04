@@ -17,14 +17,9 @@ import AlertPanel           from './components/AlertPanel'
 import SBOMScanner          from './components/SBOMScanner'
 import AssetManager         from './components/AssetManager'
 import AnalyticsDashboard   from './components/AnalyticsDashboard'
-import { fetchCVE, fetchCVEEnrichments } from './services/cveApi'
+import { lookupCVE, fetchCVEEnrichments, getUnreadAlertCount } from './services/api'
 import { buildGuide }       from './utils/guideEngine'
 import { calculateRiskScore, calculateExploitability, distinguishSeverityVsRisk } from './utils/riskScoring'
-import { buildTimeline }    from './utils/lifecycle'
-import { recordSearch, recordClassification, recordRiskScore } from './utils/analytics'
-import { logSearch, logClassification, logRiskAssessment } from './utils/auditLog'
-import { createAlert }      from './utils/alerts'
-import { getUnreadCount }   from './utils/alerts'
 
 const VIEWS = {
   HOME: 'home',
@@ -52,7 +47,7 @@ export default function App() {
   const searchGenRef = useRef(0)
 
   useEffect(() => {
-    setAlertCount(getUnreadCount())
+    getUnreadAlertCount().then(d => setAlertCount(d.count ?? 0)).catch(() => setAlertCount(0))
   }, [view])
 
   function handleReset() {
@@ -87,17 +82,13 @@ export default function App() {
     setView(VIEWS.RESULTS)
 
     try {
-      const data = await fetchCVE(id)
+      const data = await lookupCVE(id)
       if (gen !== searchGenRef.current) return
       setCveData(data)
-      recordSearch(id, data)
-      logSearch(id)
 
       const g = buildGuide(data)
       if (gen !== searchGenRef.current) return
       setGuide(g)
-      recordClassification(id, g.classification.primary, g.classification.confidence, g.classification.evidence)
-      logClassification(id, g.classification.primary, g.classification.confidence)
 
       setLoading(false)
 
@@ -108,8 +99,6 @@ export default function App() {
 
       const risk = calculateRiskScore(data, enrich)
       setRiskScore(risk)
-      recordRiskScore(id, risk.score, risk.level)
-      logRiskAssessment(id, risk.score)
 
       const exploit = calculateExploitability(data, enrich)
       setExploitability(exploit)
@@ -117,21 +106,9 @@ export default function App() {
       const svr = distinguishSeverityVsRisk(data, risk, exploit)
       setSeverityVsRisk(svr)
 
-      const tl = buildTimeline(data, enrich)
-      setTimeline(tl)
+      setTimeline(null)
 
-      if (enrich.kev?.inCatalog) {
-        createAlert({
-          type: 'kev_update',
-          title: `CVE ${id} - CISA KEV Active`,
-          message: `This vulnerability is in the CISA Known Exploited Vulnerabilities catalog.`,
-          severity: 'critical',
-          cveId: id,
-          source: 'CISA KEV',
-        })
-      }
-
-      setAlertCount(getUnreadCount())
+      getUnreadAlertCount().then(d => setAlertCount(d.count ?? 0)).catch(() => {})
 
       setTimeout(() => {
         if (gen === searchGenRef.current) {
@@ -249,7 +226,7 @@ export default function App() {
 
         {view === VIEWS.SBOM && (
           <SBOMScanner onPackagesParsed={() => {
-              setAlertCount(getUnreadCount())
+              getUnreadAlertCount().then(d => setAlertCount(d.count ?? 0)).catch(() => {})
             }} />
         )}
 

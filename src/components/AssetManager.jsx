@@ -1,5 +1,5 @@
-import { useState, useCallback } from 'react'
-import { getAssets, addAsset, deleteAsset, getAssetSummary } from '../utils/assetStore'
+import { useState, useCallback, useEffect } from 'react'
+import { listAssets, createAsset, deleteAsset, getAssetSummary } from '../services/api'
 
 const CRITICITY_COLORS = {
   critical: 'text-red-400',
@@ -22,14 +22,19 @@ export default function AssetManager() {
     internetFacing: false, criticality: 'medium', owner: '',
     softwareName: '', softwareVersion: '',
   })
-  const [, setTick] = useState(0)
+  const [assets, setAssets] = useState([])
+  const [summary, setSummary] = useState(null)
+  const [tick, setTick] = useState(0)
   const bump = useCallback(() => setTick(t => t + 1), [])
 
-  const assets = getAssets()
-  const summary = getAssetSummary()
+  useEffect(() => {
+    Promise.all([listAssets(), getAssetSummary()])
+      .then(([a, s]) => { setAssets(a ?? []); setSummary(s ?? null) })
+      .catch(() => { setAssets([]); setSummary(null) })
+  }, [tick])
 
-  function handleAdd() {
-    addAsset({
+  async function handleAdd() {
+    await createAsset({
       name: form.name,
       type: form.type,
       hostname: form.hostname,
@@ -48,8 +53,8 @@ export default function AssetManager() {
     bump()
   }
 
-  function handleDelete(id) {
-    deleteAsset(id)
+  async function handleDelete(id) {
+    await deleteAsset(id)
     bump()
   }
 

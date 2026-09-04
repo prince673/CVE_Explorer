@@ -1,31 +1,41 @@
-import { useState } from 'react'
-import { getAnalytics, clearAnalytics } from '../utils/analytics'
-import { getRemediationStats } from '../utils/remediation'
-import { getAuditStats } from '../utils/auditLog'
+import { useState, useEffect } from 'react'
+import { getDashboardAnalytics } from '../services/api'
 
 export default function AnalyticsDashboard() {
-  const [, setRefreshKey] = useState(0)
+  const [analytics, setAnalytics] = useState(null)
+  const [loading, setLoading] = useState(true)
 
-  const analytics = getAnalytics()
-  const remStats = getRemediationStats()
-  const auditStats = getAuditStats()
+  useEffect(() => {
+    let cancelled = false
+    getDashboardAnalytics()
+      .then(data => { if (!cancelled) setAnalytics(data) })
+      .catch(() => { if (!cancelled) setAnalytics(null) })
+      .finally(() => { if (!cancelled) setLoading(false) })
+    return () => { cancelled = true }
+  }, [])
+
+  if (loading) {
+    return (
+      <div className="space-y-5">
+        <div className="flex items-center gap-2 mb-2">
+          <span className="text-lg">📊</span>
+          <h2 className="font-bold text-lg text-white">Security Analytics</h2>
+        </div>
+        <p className="text-sm text-gray-500 text-center py-8">Loading analytics...</p>
+      </div>
+    )
+  }
 
   if (!analytics) return null
 
-  const sevEntries = Object.entries(analytics.severityDistribution)
-  const riskEntries = Object.entries(analytics.riskDistribution)
+  const sevEntries = Object.entries(analytics.severityDistribution || {})
+  const riskEntries = Object.entries(analytics.riskDistribution || {})
 
   return (
     <div className="space-y-5">
       <div className="flex items-center gap-2 mb-2">
         <span className="text-lg">📊</span>
         <h2 className="font-bold text-lg text-white">Security Analytics</h2>
-        <button
-          onClick={() => { clearAnalytics(); setRefreshKey(k => k + 1) }}
-          className="ml-auto text-xs text-gray-600 hover:text-red-400"
-        >
-          Reset Analytics
-        </button>
       </div>
 
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
@@ -87,54 +97,6 @@ export default function AnalyticsDashboard() {
             })}
           </div>
         </div>
-
-        {remStats && remStats.total > 0 && (
-          <div className="card">
-            <h3 className="font-bold text-sm text-white mb-3">Remediation Metrics</h3>
-            <div className="grid grid-cols-2 gap-3 text-center">
-              <div>
-                <div className="text-lg font-bold text-accent-cyan">{remStats.total}</div>
-                <div className="text-[10px] text-gray-500">Total Records</div>
-              </div>
-              <div>
-                <div className="text-lg font-bold text-red-400">{remStats.overdue}</div>
-                <div className="text-[10px] text-gray-500">Overdue</div>
-              </div>
-              <div>
-                <div className="text-lg font-bold text-green-400">{remStats.closedCount}</div>
-                <div className="text-[10px] text-gray-500">Closed</div>
-              </div>
-              <div>
-                <div className="text-lg font-bold text-amber-400">{remStats.avgDaysToFix}d</div>
-                <div className="text-[10px] text-gray-500">Avg Time to Fix</div>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {auditStats && (
-          <div className="card">
-            <h3 className="font-bold text-sm text-white mb-3">Audit Activity</h3>
-            <div className="grid grid-cols-2 gap-3 text-center">
-              <div>
-                <div className="text-lg font-bold text-accent-purple">{auditStats.total}</div>
-                <div className="text-[10px] text-gray-500">Total Events</div>
-              </div>
-              <div>
-                <div className="text-lg font-bold text-accent-cyan">{Object.keys(auditStats.byAction).length}</div>
-                <div className="text-[10px] text-gray-500">Action Types</div>
-              </div>
-            </div>
-            <div className="mt-3 space-y-1">
-              {Object.entries(auditStats.byAction).slice(0, 5).map(([action, count]) => (
-                <div key={action} className="flex justify-between text-xs">
-                  <span className="text-gray-400">{action}</span>
-                  <span className="text-gray-500">{count}</span>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
       </div>
     </div>
   )

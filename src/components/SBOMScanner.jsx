@@ -1,7 +1,6 @@
 import { useState, useRef } from 'react'
 import { parseSBOM } from '../utils/sbomParser'
-import { importAssetsFromSBOM } from '../utils/assetStore'
-import { logAudit } from '../utils/auditLog'
+import { createAsset } from '../services/api'
 
 export default function SBOMScanner({ onPackagesParsed }) {
   const [result, setResult] = useState(null)
@@ -18,20 +17,30 @@ export default function SBOMScanner({ onPackagesParsed }) {
       if (typeof content === 'string') {
         const parsed = parseSBOM(file.name, content)
         setResult(parsed)
-        logAudit({ action: 'sbom.parse', entityType: 'sbom', detail: `Parsed ${file.name}: ${parsed.totalPackages} packages (${parsed.format})` })
         onPackagesParsed?.(parsed)
       }
     }
     reader.readAsText(file)
   }
 
-  function handleImport() {
+  async function handleImport() {
     if (!result?.packages) return
     setImporting(true)
-    const importedAssets = importAssetsFromSBOM(result.packages)
-    setImported(importedAssets.length)
+    let count = 0
+    for (const pkg of result.packages) {
+      try {
+        await createAsset({
+          name: pkg.name,
+          type: 'dependency',
+          environment: 'production',
+          criticality: 'medium',
+          software: [{ name: pkg.name, version: pkg.version }],
+        })
+        count++
+      } catch { /* skip failed */ }
+    }
+    setImported(count)
     setImporting(false)
-    logAudit({ action: 'sbom.import', entityType: 'asset', detail: `Imported ${importedAssets.length} assets from SBOM` })
   }
 
   return (

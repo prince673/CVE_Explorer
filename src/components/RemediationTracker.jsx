@@ -1,8 +1,10 @@
-import { useState, useCallback } from 'react'
+import { useState, useCallback, useEffect } from 'react'
 import {
   getRemediationForCVE, createRemediation, updateRemediation,
-  STATUSES, PRIORITIES,
-} from '../utils/remediation'
+} from '../services/api'
+
+const STATUSES = ['open', 'assigned', 'in_progress', 'fixed', 'verified', 'closed']
+const PRIORITIES = ['p1_critical', 'p2_high', 'p3_medium', 'p4_low']
 
 const STATUS_LABELS = {
   open: 'Open', assigned: 'Assigned', in_progress: 'In Progress',
@@ -25,13 +27,22 @@ const PRIORITY_LABELS = {
 export default function RemediationTracker({ cveId }) {
   const [showForm, setShowForm] = useState(false)
   const [form, setForm] = useState({ assignedTo: '', priority: 'p3_medium', notes: '' })
-  const [, setTick] = useState(0)
+  const [records, setRecords] = useState([])
+  const [tick, setTick] = useState(0)
   const bump = useCallback(() => setTick(t => t + 1), [])
 
-  const records = cveId ? getRemediationForCVE(cveId) : []
+  useEffect(() => {
+    if (!cveId) return
+    let cancelled = false
+    getRemediationForCVE(cveId)
+      .then(data => { if (!cancelled) setRecords(data ?? []) })
+      .catch(() => { if (!cancelled) setRecords([]) })
+    return () => { cancelled = true }
+  }, [cveId, tick])
 
-  function handleCreate() {
-    createRemediation(cveId, {
+  async function handleCreate() {
+    await createRemediation({
+      cveId,
       assignedTo: form.assignedTo,
       priority: form.priority,
       notes: form.notes,
@@ -41,12 +52,12 @@ export default function RemediationTracker({ cveId }) {
     bump()
   }
 
-  function handleAdvance(id) {
+  async function handleAdvance(id) {
     const rec = records.find(r => r.id === id)
     if (!rec) return
     const nextStatus = STATUSES[STATUSES.indexOf(rec.status) + 1]
     if (nextStatus) {
-      updateRemediation(id, { status: nextStatus })
+      await updateRemediation(id, { status: nextStatus })
       bump()
     }
   }

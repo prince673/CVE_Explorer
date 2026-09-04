@@ -1,5 +1,5 @@
-import { useState, useCallback } from 'react'
-import { getAlerts, markAlertRead, markAllRead, acknowledgeAlert, getUnreadCount } from '../utils/alerts'
+import { useState, useCallback, useEffect } from 'react'
+import { listAlerts, markAlertRead, markAllAlertsRead, acknowledgeAlert, getUnreadAlertCount } from '../services/api'
 
 const SEVERITY_COLORS = {
   critical: 'border-red-500/40 bg-red-500/8',
@@ -17,27 +17,27 @@ const SEVERITY_DOTS = {
 
 export default function AlertPanel() {
   const [filter, setFilter] = useState('all')
-  const [, setTick] = useState(0)
-
-  const f = filter === 'unread' ? { unreadOnly: true } : filter !== 'all' ? { type: filter } : {}
-  const alerts = getAlerts(f)
-  const unread = getUnreadCount()
-
+  const [alerts, setAlerts] = useState([])
+  const [unread, setUnread] = useState(0)
+  const [tick, setTick] = useState(0)
   const bump = useCallback(() => setTick(t => t + 1), [])
 
+  useEffect(() => {
+    const opts = filter === 'unread' ? { unreadOnly: true } : filter !== 'all' ? { type: filter } : {}
+    listAlerts(opts).then(data => setAlerts(data ?? [])).catch(() => setAlerts([]))
+    getUnreadAlertCount().then(d => setUnread(d.count ?? 0)).catch(() => setUnread(0))
+  }, [filter, tick])
+
   function handleMarkRead(id) {
-    markAlertRead(id)
-    bump()
+    markAlertRead(id).then(() => bump())
   }
 
   function handleAcknowledge(id) {
-    acknowledgeAlert(id)
-    bump()
+    acknowledgeAlert(id).then(() => bump())
   }
 
   function handleMarkAllRead() {
-    markAllRead()
-    bump()
+    markAllAlertsRead().then(() => bump())
   }
 
   return (

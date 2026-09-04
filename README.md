@@ -1,67 +1,96 @@
-# CVE Explorer — React Frontend
+# CVE Explorer
 
-A modern, multi-file React application for educational CVE vulnerability research.
+A vulnerability intelligence platform with risk scoring, asset correlation, SBOM support, and remediation tracking.
 
-## Features
-- 🔍 Fetches CVE details from CIRCL API (primary) + NVD (fallback)
-- 🧠 Rule-based guide engine mapping CWE → exploitation guide (8 types)
-- 📋 Copy-to-clipboard for code blocks, CVE ID, and description
-- 🌙 Dark / light theme with persistence
-- 📱 Fully responsive (mobile-first)
-- ⚠️ Mandatory disclaimer modal
+## Architecture
+
+```
+React Dashboard → FastAPI Backend → PostgreSQL
+                         ↓
+              ┌──────────┼──────────┐
+              ↓          ↓          ↓
+         CVE Service  Risk Engine  AI Service
+              ↓          ↓          ↓
+         CIRCL/NVD    EPSS/KEV    Assets
+              └──────────┬──────────┘
+                         ↓
+                  Correlation Engine
+                         ↓
+               Remediation + Alerts
+```
 
 ## Quick Start
 
+### Docker (recommended)
+
 ```bash
-# Install dependencies
+docker-compose up -d
+```
+
+- Frontend: http://localhost:5173
+- Backend API: http://localhost:8000
+- API docs: http://localhost:8000/docs
+
+### Manual Setup
+
+**Backend:**
+```bash
+cd backend
+pip install -r requirements.txt
+# Set DATABASE_URL in .env
+alembic upgrade head
+uvicorn app.main:app --reload --port 8000
+```
+
+**Frontend:**
+```bash
 npm install
-
-# Start dev server
 npm run dev
-# → http://localhost:5173
-
-# Build for production
-npm run build
 ```
 
-## Project Structure
+## API Endpoints
 
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/cve/{id}` | Full CVE lookup with enrichment + risk |
+| GET | `/api/cve/{id}/enrichments` | EPSS, KEV, exploit data |
+| GET | `/api/cve/{id}/assets` | Affected assets |
+| GET | `/api/assets/` | List all assets |
+| POST | `/api/assets/` | Create asset |
+| GET | `/api/assets/summary` | Asset statistics |
+| GET | `/api/remediation/{cve_id}` | Remediation records |
+| POST | `/api/remediation/` | Create record |
+| PATCH | `/api/remediation/{id}` | Update status |
+| GET | `/api/alerts/` | List alerts |
+| GET | `/api/alerts/unread-count` | Unread count |
+| GET | `/api/analytics/dashboard` | Dashboard stats |
+| GET | `/api/health` | Health check |
+
+## Features
+
+- **Multi-source CVE intelligence** (CIRCL, NVD, EPSS, CISA KEV)
+- **Explainable risk scoring** with factor breakdown
+- **Asset inventory** with CVE-to-asset correlation
+- **SBOM scanning** (CycloneDX, SPDX, package.json, requirements.txt)
+- **Remediation lifecycle** tracking (Open → Closed)
+- **Alerting** for KEV, EPSS changes, new exploits
+- **Analytics dashboard** with severity/risk distributions
+- **Background workers** for continuous monitoring
+- **Docker** deployment ready
+
+## Development
+
+```bash
+npm test          # Run frontend tests
+npm run lint      # Check code quality
+npm run build     # Production build
 ```
-src/
-├── components/        # React UI components
-│   ├── DisclaimerModal.jsx
-│   ├── Header.jsx
-│   ├── InputForm.jsx
-│   ├── VulnerabilityCard.jsx
-│   ├── ExploitationGuide.jsx
-│   ├── CodeBlock.jsx
-│   ├── SeverityBadge.jsx
-│   ├── LoadingSpinner.jsx
-│   └── Footer.jsx
-├── services/
-│   └── cveApi.js      # CIRCL + NVD API integration
-├── data/
-│   └── guideTemplates.js   # 8 exploitation guide templates
-├── utils/
-│   ├── guideEngine.js # CWE/keyword → guide mapping
-│   └── formatters.js  # Date, severity, CVSS helpers
-├── App.jsx            # Root component + state
-└── main.jsx           # Entry point
-```
 
-## Supported Guide Types
-| CWE | Type |
-|---|---|
-| CWE-89 | SQL Injection |
-| CWE-79 | Cross-Site Scripting |
-| CWE-78 | OS Command Injection |
-| CWE-22/23 | Path Traversal |
-| CWE-98 | Local File Inclusion |
-| CWE-502 | Insecure Deserialization |
-| CWE-94 | Remote Code Execution |
-| — | Generic (fallback) |
+## Tech Stack
 
-## Legal
-**For authorized security research and education only.**
-All commands use `[TARGET_URL]` / `[ATTACKER_IP]` placeholders.
-Unauthorized use is illegal.
+- **Frontend:** React 19 + Vite + Tailwind CSS
+- **Backend:** FastAPI + Python 3.12
+- **Database:** PostgreSQL 16
+- **Cache:** Redis 7
+- **Workers:** Celery
+- **Deployment:** Docker Compose
