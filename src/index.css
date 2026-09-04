@@ -1,0 +1,45 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html { scroll-behavior: smooth; }
+  body { @apply font-sans antialiased; }
+
+  ::-webkit-scrollbar { width: 6px; }
+  ::-webkit-scrollbar-track { @apply bg-dark-bg2; }
+  ::-webkit-scrollbar-thumb { @apply bg-dark-border rounded; }
+}
+
+@layer components {
+  .card {
+    @apply bg-dark-card border border-dark-border rounded-xl p-6 shadow-[0_8px_32px_rgba(0,0,0,0.45)] animate-fade-up;
+  }
+  .card-light {
+    @apply bg-white border border-gray-200 rounded-xl p-6 shadow-sm animate-fade-up;
+  }
+  .btn-primary {
+    @apply px-6 py-3 rounded-lg font-bold text-white text-sm
+           bg-gradient-to-r from-accent-cyan to-accent-purple
+           hover:opacity-85 active:scale-95 transition-all duration-200
+           disabled:opacity-40 disabled:cursor-not-allowed disabled:scale-100;
+  }
+  .btn-ghost {
+    @apply px-4 py-2 rounded-lg text-sm font-medium border transition-colors duration-200
+           border-dark-border text-gray-400 hover:border-accent-cyan hover:text-accent-cyan;
+  }
+  .input-field {
+    @apply flex-1 px-4 py-3 rounded-lg font-mono text-sm bg-dark-bg border border-dark-border
+           text-gray-100 placeholder-gray-600
+           focus:outline-none focus:border-accent-cyan focus:ring-1 focus:ring-accent-cyan/30
+           transition-colors duration-200;
+  }
+  .tag {
+    @apply px-3 py-1 rounded-full text-xs font-semibold border;
+  }
+  .section-label {
+    @apply text-xs font-bold uppercase tracking-widest text-gray-500 mb-3;
+  }
+}
